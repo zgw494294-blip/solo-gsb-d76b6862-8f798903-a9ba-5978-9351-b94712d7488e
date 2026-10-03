@@ -81,6 +81,10 @@ function updateBusy() {
 let archiveSubmitting = false; // 归档请求在途，禁用提交防止重复建档案
 let currentDetail = null;      // 当前查看的档案详情（"以此开新场"使用）
 let startSubmitting = false;   // 以此开新场请求在途，禁用提交防重复
+/* 档案弹窗视图序号：进入列表/详情/归档表单/对照任一视图、或关闭弹窗时 +1。
+ * 视图内发出的请求都记下发起时的序号；响应回来时序号不符，说明弹窗已关闭
+ * 或已切到别的视图——无论成功、空列表还是失败都直接丢弃，不改写当前视图。 */
+let archivesViewSeq = 0;
 
 function statusLabel(status) {
   return status === "done" ? "已完成" : "提前收场";
@@ -96,6 +100,7 @@ function openArchivesModal() {
 }
 
 function closeArchivesModal() {
+  archivesViewSeq++; // 关闭弹窗：列表/详情/对照的在途请求一并失效
   $("#archives-modal").classList.add("hidden");
 }
 
@@ -106,17 +111,19 @@ async function apiGetJson(path) {
 }
 
 async function loadArchiveList() {
+  const viewSeq = ++archivesViewSeq; // 进入列表视图：旧视图（含对照）在途请求失效
   currentDetail = null;
-  compareSeq++; // 离开对照视图（若曾在），作废可能在途的对照响应
   $("#archives-title").textContent = "📚 档案库";
   $("#archives-body").innerHTML = `<p class="empty">加载中…</p>`;
   let data;
   try {
     data = await apiGetJson("/api/archives");
   } catch (err) {
+    if (viewSeq !== archivesViewSeq) return; // 已离开列表或弹窗已关闭，过期失败不覆盖当前视图
     $("#archives-body").innerHTML = `<p class="empty">档案加载失败：${escapeHtml(err.message)}</p>`;
     return;
   }
+  if (viewSeq !== archivesViewSeq) return; // 已离开列表或弹窗已关闭，丢弃过期响应
   const items = data.archives || [];
   const canArchive = state && state.status !== "setup";
   if (!items.length) {
@@ -144,17 +151,20 @@ async function loadArchiveList() {
 }
 
 async function loadArchiveDetail(id) {
+  const viewSeq = ++archivesViewSeq; // 进入详情视图：旧视图在途请求失效
   $("#archives-title").textContent = "档案详情";
   $("#archives-body").innerHTML = `<p class="empty">加载中…</p>`;
   let a;
   try {
     a = await apiGetJson("/api/archives/" + encodeURIComponent(id));
   } catch (err) {
+    if (viewSeq !== archivesViewSeq) return; // 已离开详情或弹窗已关闭，过期失败不覆盖当前视图
     $("#archives-body").innerHTML = `
       <p class="empty">档案加载失败：${escapeHtml(err.message)}</p>
       <div class="actions"><button data-action="archive-list">← 返回列表</button></div>`;
     return;
   }
+  if (viewSeq !== archivesViewSeq) return; // 已离开详情或弹窗已关闭，丢弃过期响应
   currentDetail = a;
   const total = a.issued.length + a.pending.length;
   const canStart = state && state.status === "setup";
@@ -208,6 +218,7 @@ function openArchiveForm() {
     toast("开场前没有可归档的场次");
     return;
   }
+  archivesViewSeq++; // 进入归档表单视图：列表/对照的在途请求失效
   $("#archives-title").textContent = "归档本场";
   $("#archives-body").innerHTML = `
     <p class="hint">归档后本场将保存为独立档案，并清空当前提示、回到开场前设置；之后录入、重置和重启都不会影响档案。</p>
@@ -317,7 +328,7 @@ async function submitStartFromArchive() {
 
 /* ---------------------------------------------------------------- 场次对照 */
 
-let compareSeq = 0; // 对照请求序号：切换场次即作废旧响应，防止旧结果覆盖新选择
+let compareSeq = 0; // 对照选择序号：切换场次即作废旧响应；离开视图/关闭弹窗由 archivesViewSeq 兜底
 
 const COMPARE_STATUS = {
   issued: { label: "已发", cls: "issued" },
@@ -332,18 +343,21 @@ function fmtSeconds(s, signed) {
 }
 
 async function openCompareView() {
-  compareSeq++; // 离开旧对照，作废可能在途的响应
+  const viewSeq = ++archivesViewSeq; // 进入对照视图：旧视图（含列表）在途请求失效
   $("#archives-title").textContent = "场次对照";
   $("#archives-body").innerHTML = `<p class="empty">加载中…</p>`;
   let data;
   try {
     data = await apiGetJson("/api/archives");
   } catch (err) {
+    if (viewSeq !== archivesViewSeq) return; // 已离开对照或弹窗已关闭，过期失败不覆盖当前视图
     $("#archives-body").innerHTML = `
       <p class="empty">档案加载失败：${escapeHtml(err.message)}</p>
       <div class="actions"><button data-action="archive-list">← 返回列表</button></div>`;
     return;
   }
+  // 已离开对照或弹窗已关闭：过期响应不得重建选择器、恢复默认组合或触发默认对照查询
+  if (viewSeq !== archivesViewSeq) return;
   const items = data.archives || [];
   if (!items.length) {
     $("#archives-body").innerHTML = `
@@ -386,7 +400,8 @@ function compareSelectionChanged() {
 }
 
 async function runCompare(baseId, compareId) {
-  const seq = ++compareSeq; // 新请求作废旧请求；响应回来时序号不符即丢弃
+  const seq = ++compareSeq; // 新选择作废旧响应；响应回来时序号不符即丢弃
+  const viewSeq = archivesViewSeq; // 离开对照视图或关闭弹窗后，响应同样丢弃
   const result = $("#compare-result");
   result.innerHTML = `<p class="empty">对照中…</p>`;
   let res, data;
@@ -396,11 +411,12 @@ async function runCompare(baseId, compareId) {
     );
     data = await res.json();
   } catch (err) {
-    if (seq !== compareSeq) return;
+    if (seq !== compareSeq || viewSeq !== archivesViewSeq) return;
     result.innerHTML = `<p class="empty">对照失败：${escapeHtml(err.message)}</p>`;
     return;
   }
-  if (seq !== compareSeq) return; // 场次已切换，不用旧响应覆盖新结果
+  // 场次已切换、已离开对照视图或弹窗已关闭：不用旧响应覆盖当前结果
+  if (seq !== compareSeq || viewSeq !== archivesViewSeq) return;
   if (res.status === 404) {
     result.innerHTML = `<p class="empty">档案不存在，可能已被删除，请返回列表刷新。</p>`;
     return;
