@@ -81,6 +81,9 @@ function updateBusy() {
 let archiveSubmitting = false; // 归档请求在途，禁用提交防止重复建档案
 let currentDetail = null;      // 当前查看的档案详情（"以此开新场"使用）
 let startSubmitting = false;   // 以此开新场请求在途，禁用提交防重复
+// 档案弹窗视图世代：关闭弹窗或离开当前视图（列表/详情/对照）时 +1，
+// 在途的 GET 响应回来时世代不符即丢弃，迟到响应不得改写当前视图。
+let archiveViewSeq = 0;
 
 function statusLabel(status) {
   return status === "done" ? "已完成" : "提前收场";
@@ -97,6 +100,10 @@ function openArchivesModal() {
 
 function closeArchivesModal() {
   $("#archives-modal").classList.add("hidden");
+  // 关闭弹窗：作废列表/详情/对照所有尚未返回的请求，无论之后成功、
+  // 空列表还是失败都不得再改写弹窗（此时弹窗已不属于任何视图）。
+  archiveViewSeq++;
+  compareSeq++;
 }
 
 async function apiGetJson(path) {
@@ -106,17 +113,20 @@ async function apiGetJson(path) {
 }
 
 async function loadArchiveList() {
+  const viewSeq = ++archiveViewSeq; // 进入列表视图，作废此前一切在途请求
+  compareSeq++;                     // 离开对照视图（若曾在），作废在途的对照结果请求
   currentDetail = null;
-  compareSeq++; // 离开对照视图（若曾在），作废可能在途的对照响应
   $("#archives-title").textContent = "📚 档案库";
   $("#archives-body").innerHTML = `<p class="empty">加载中…</p>`;
   let data;
   try {
     data = await apiGetJson("/api/archives");
   } catch (err) {
+    if (viewSeq !== archiveViewSeq) return; // 已关闭弹窗或离开列表，错误不得覆盖当前页
     $("#archives-body").innerHTML = `<p class="empty">档案加载失败：${escapeHtml(err.message)}</p>`;
     return;
   }
+  if (viewSeq !== archiveViewSeq) return; // 迟到响应：不得改写当前标题/页面
   const items = data.archives || [];
   const canArchive = state && state.status !== "setup";
   if (!items.length) {
@@ -332,18 +342,21 @@ function fmtSeconds(s, signed) {
 }
 
 async function openCompareView() {
-  compareSeq++; // 离开旧对照，作废可能在途的响应
+  ++archiveViewSeq;              // 进入对照视图，作废旧列表在途响应（防止列表覆盖对照页）
+  const formSeq = ++compareSeq;  // 作废此前在途的对照结果请求与表单重建
   $("#archives-title").textContent = "场次对照";
   $("#archives-body").innerHTML = `<p class="empty">加载中…</p>`;
   let data;
   try {
     data = await apiGetJson("/api/archives");
   } catch (err) {
+    if (formSeq !== compareSeq) return; // 已离开对照，迟到失败不得覆盖当前页
     $("#archives-body").innerHTML = `
       <p class="empty">档案加载失败：${escapeHtml(err.message)}</p>
       <div class="actions"><button data-action="archive-list">← 返回列表</button></div>`;
     return;
   }
+  if (formSeq !== compareSeq) return; // 迟到响应：不得重建表单、恢复默认选择或触发默认查询
   const items = data.archives || [];
   if (!items.length) {
     $("#archives-body").innerHTML = `
